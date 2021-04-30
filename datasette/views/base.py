@@ -421,7 +421,7 @@ class DataView(BaseView):
         if _format == "csv":
             return await self.as_csv(request, database, hash, **kwargs)
 
-        if _format is None:
+        if not _format:
             # HTML views default to expanding all foreign key labels
             kwargs["default_labels"] = True
 
