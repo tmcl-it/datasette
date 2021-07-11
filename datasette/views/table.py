@@ -110,14 +110,66 @@ class RowTableShared(DataView):
             sortable_columns.add("rowid")
         return sortable_columns
 
-    async def expandable_columns(self, database, table):
-        # Returns list of (fk_dict, label_column-or-None) pairs for that table
-        expandables = []
+    async def expand_labels(
+        self, request, database, table, columns, rows, default_labels
+    ):
+
+        # Get list of (fk_dict, label_column-or-None) pairs for the table
+        expandable_columns = []
         db = self.ds.databases[database]
         for fk in await db.foreign_keys_for_table(table):
             label_column = await db.label_column_for_table(fk["other_table"])
-            expandables.append((fk, label_column))
-        return expandables
+            expandable_columns.append((fk, label_column))
+
+        # Prepare list of columns to expand
+        columns_to_expand = None
+        try:
+            all_labels = value_as_boolean(request.args.get("_labels", ""))
+        except ValueError:
+            all_labels = default_labels
+        # Check for explicit _label=
+        if "_label" in request.args:
+            columns_to_expand = request.args.getlist("_label")
+        if columns_to_expand is None and all_labels:
+            # expand all columns with foreign keys
+            columns_to_expand = [fk["column"] for fk, _ in expandable_columns]
+
+        # Expand labeled columns if requested
+        expanded_columns = []
+        if columns_to_expand:
+            expanded_labels = {}
+            for fk, _ in expandable_columns:
+                column = fk["column"]
+                if column not in columns_to_expand:
+                    continue
+                if column not in columns:
+                    continue
+                expanded_columns.append(column)
+                # Gather the values
+                column_index = columns.index(column)
+                values = [row[column_index] for row in rows]
+                # Expand them
+                expanded_labels.update(
+                    await self.ds.expand_foreign_keys(database, table, column, values)
+                )
+            if expanded_labels:
+                # Rewrite the rows
+                new_rows = []
+                for row in rows:
+                    new_row = CustomRow(columns)
+                    for column in row.keys():
+                        value = row[column]
+                        if (column, value) in expanded_labels and value is not None:
+                            new_row[column] = {
+                                "value": value,
+                                "label": expanded_labels[(column, value)],
+                            }
+                        else:
+                            new_row[column] = value
+                    new_rows.append(new_row)
+                rows = new_rows
+
+        return expandable_columns, expanded_columns, rows
 
     async def display_columns_and_rows(
         self, database, table, description, rows, link_column=False, truncate_cells=0
@@ -757,52 +809,9 @@ class TableView(RowTableShared):
         rows = list(results.rows)
 
         # Expand labeled columns if requested
-        expanded_columns = []
-        expandable_columns = await self.expandable_columns(database, table)
-        columns_to_expand = None
-        try:
-            all_labels = value_as_boolean(special_args.get("_labels", ""))
-        except ValueError:
-            all_labels = default_labels
-        # Check for explicit _label=
-        if "_label" in request.args:
-            columns_to_expand = request.args.getlist("_label")
-        if columns_to_expand is None and all_labels:
-            # expand all columns with foreign keys
-            columns_to_expand = [fk["column"] for fk, _ in expandable_columns]
-
-        if columns_to_expand:
-            expanded_labels = {}
-            for fk, _ in expandable_columns:
-                column = fk["column"]
-                if column not in columns_to_expand:
-                    continue
-                if column not in columns:
-                    continue
-                expanded_columns.append(column)
-                # Gather the values
-                column_index = columns.index(column)
-                values = [row[column_index] for row in rows]
-                # Expand them
-                expanded_labels.update(
-                    await self.ds.expand_foreign_keys(database, table, column, values)
-                )
-            if expanded_labels:
-                # Rewrite the rows
-                new_rows = []
-                for row in rows:
-                    new_row = CustomRow(columns)
-                    for column in row.keys():
-                        value = row[column]
-                        if (column, value) in expanded_labels and value is not None:
-                            new_row[column] = {
-                                "value": value,
-                                "label": expanded_labels[(column, value)],
-                            }
-                        else:
-                            new_row[column] = value
-                    new_rows.append(new_row)
-                rows = new_rows
+        expandable_columns, expanded_columns, rows = await self.expand_labels(
+            request, database, table, columns, rows, default_labels
+        )
 
         # Pagination next link
         next_value = None
@@ -1008,6 +1017,11 @@ class RowView(RowTableShared):
         rows = list(results.rows)
         if not rows:
             raise NotFound(f"Record not found: {pk_values}")
+
+        # Expand labeled columns if requested
+        _, _, rows = await self.expand_labels(
+            request, database, table, columns, rows, default_labels
+        )
 
         async def template_data():
             display_columns, display_rows = await self.display_columns_and_rows(
