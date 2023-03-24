@@ -10,7 +10,7 @@ from datasette.utils import (
 )
 import json
 import sqlite_utils
-from .table import display_columns_and_rows
+from .table import display_columns_and_rows, expand_labels
 
 
 class RowView(DataView):
@@ -42,6 +42,11 @@ class RowView(DataView):
         rows = list(results.rows)
         if not rows:
             raise NotFound(f"Record not found: {pk_values}")
+
+        # Expand labeled columns if requested
+        rows, _ = await expand_labels(
+            self.ds, database, table, columns, rows, request.args, default_labels
+        )
 
         async def template_data():
             display_columns, display_rows = await display_columns_and_rows(
